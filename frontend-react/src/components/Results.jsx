@@ -614,6 +614,10 @@ function ForceGraph({ graphData }) {
 
 const TAB_LIST = ['AI Brief', 'Agents', 'Retrieval', 'Events', 'Forecasts', 'Models', 'Graph'];
 
+/* Toggle to re-enable the raw assessment JSON viewer on the website.
+   Hidden by default; the code below is kept intact, just not rendered. */
+const SHOW_RAW_JSON = false;
+
 export default function Results({ assessment }) {
   const [activeTab, setActiveTab] = useState(0);
   const [jsonExpanded, setJsonExpanded] = useState(false);
@@ -861,23 +865,25 @@ export default function Results({ assessment }) {
         )}
       </div>
 
-      {/* Raw JSON Expander */}
-      <div className="expander">
-        <div
-          className="expander-header"
-          onClick={() => setJsonExpanded(!jsonExpanded)}
-        >
-          <span>Raw assessment JSON</span>
-          <span className={`expander-arrow ${jsonExpanded ? 'open' : ''}`}>&#9660;</span>
-        </div>
-        {jsonExpanded && (
-          <div className="expander-body">
-            <pre className="json-viewer">
-              {JSON.stringify(assessment, null, 2)}
-            </pre>
+      {/* Raw JSON Expander (hidden on the website; flip SHOW_RAW_JSON to re-enable) */}
+      {SHOW_RAW_JSON && (
+        <div className="expander">
+          <div
+            className="expander-header"
+            onClick={() => setJsonExpanded(!jsonExpanded)}
+          >
+            <span>Raw assessment JSON</span>
+            <span className={`expander-arrow ${jsonExpanded ? 'open' : ''}`}>&#9660;</span>
           </div>
-        )}
-      </div>
+          {jsonExpanded && (
+            <div className="expander-body">
+              <pre className="json-viewer">
+                {JSON.stringify(assessment, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
