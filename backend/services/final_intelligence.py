@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Dict, Iterable, List, Sequence
+import threading
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import networkx as nx
 import numpy as np
@@ -24,7 +25,7 @@ from backend.schemas import (
     RetrievalResult,
     RiskFactor,
 )
-from backend.services.dataset_builder import load_training_dataset
+from backend.services.dataset_builder import TRAINING_DATASET_PATH, load_training_dataset
 
 REAL_FEATURE_COLUMNS = [
     "gdp_growth",
@@ -124,30 +125,35 @@ def score_sentiment(evidence: Sequence[EvidenceItem]) -> Dict[str, object]:
 def build_agent_outputs(factors: Sequence[RiskFactor], evidence: Sequence[EvidenceItem]) -> List[AgentOutput]:
     factor_map = {factor.name: factor for factor in factors}
     unavailable = [item.label for item in evidence if item.status != "ok"]
+
+    def _rationale(name: str) -> str:
+        factor = factor_map.get(name)
+        return factor.rationale if factor else "No rationale available for this factor."
+
     return [
         AgentOutput(
             agent="Economic Agent",
-            finding=factor_map["Macroeconomic growth"].rationale,
+            finding=_rationale("Macroeconomic growth"),
             confidence=0.82 if "GDP growth" not in unavailable else 0.55,
         ),
         AgentOutput(
             agent="Political Risk Agent",
-            finding=factor_map["Political stability"].rationale,
-            confidence=0.74 if "Political stability estimate" not in unavailable else 0.45,
+            finding=_rationale("Political stability"),
+            confidence=0.74 if "Political stability score" not in unavailable else 0.45,
         ),
         AgentOutput(
             agent="Trade Agent",
-            finding=factor_map["Trade exposure"].rationale,
+            finding=_rationale("Trade exposure"),
             confidence=0.76 if "Trade signal" not in unavailable else 0.5,
         ),
         AgentOutput(
             agent="Weather Agent",
-            finding=factor_map["Weather disruption"].rationale,
+            finding=_rationale("Weather disruption"),
             confidence=0.85,
         ),
         AgentOutput(
             agent="News Agent",
-            finding=factor_map["News and event risk"].rationale,
+            finding=_rationale("News and event risk"),
             confidence=0.8 if "News signal" not in unavailable else 0.45,
         ),
     ]
@@ -260,16 +266,54 @@ def _training_data() -> tuple[pd.DataFrame, pd.Series]:
     raise RuntimeError("Real training dataset is missing or too small. Run scripts/build_training_dataset.py first.")
 
 
+_TRAINED_LOCK = threading.Lock()
+_TRAINED_CACHE: Optional[dict] = None
+_CONFORMAL_LOCK = threading.Lock()
+_CONFORMAL_CACHE: Optional[dict] = None
+
+
+def _dataset_signature() -> Optional[float]:
+    """Modification time of the training CSV, used to invalidate cached models."""
+    try:
+        return TRAINING_DATASET_PATH.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _get_trained_models() -> tuple[Dict[str, object], pd.DataFrame, pd.Series]:
+    """Train the GBM ensemble once per process (and per training-CSV version).
+
+    The models depend only on the training dataset, not on the request, so the
+    fitted models are cached across requests instead of retrained on every
+    ``/assess`` call. The cache is rebuilt automatically if the CSV is
+    regenerated (detected via its modification time). Double-checked locking
+    keeps the training safe under FastAPI's threadpool.
+    """
+    global _TRAINED_CACHE
+    signature = _dataset_signature()
+    cache = _TRAINED_CACHE
+    if cache is not None and cache["signature"] == signature:
+        return cache["models"], cache["x_train"], cache["y_train"]
+
+    with _TRAINED_LOCK:
+        cache = _TRAINED_CACHE
+        if cache is not None and cache["signature"] == signature:
+            return cache["models"], cache["x_train"], cache["y_train"]
+        x_train, y_train = _training_data()
+        models = {
+            "xgboost": XGBRegressor(n_estimators=40, max_depth=2, learning_rate=0.08, objective="reg:squarederror", random_state=7),
+            "catboost": CatBoostRegressor(iterations=40, depth=2, learning_rate=0.08, loss_function="RMSE", verbose=False, random_seed=7),
+            "lightgbm": LGBMRegressor(n_estimators=40, max_depth=2, learning_rate=0.08, random_state=7, verbose=-1),
+        }
+        for model in models.values():
+            model.fit(x_train, y_train)
+        _TRAINED_CACHE = {"signature": signature, "models": models, "x_train": x_train, "y_train": y_train}
+        return models, x_train, y_train
+
+
 def _fit_models(country: str, evidence: Sequence[EvidenceItem]) -> tuple[Dict[str, object], pd.DataFrame, pd.Series, pd.DataFrame]:
-    x_train, y_train = _training_data()
+    models, x_train, y_train = _get_trained_models()
     x_current = _feature_vector(country, evidence, x_train.columns)
-    models = {
-        "xgboost": XGBRegressor(n_estimators=40, max_depth=2, learning_rate=0.08, objective="reg:squarederror", random_state=7),
-        "catboost": CatBoostRegressor(iterations=40, depth=2, learning_rate=0.08, loss_function="RMSE", verbose=False, random_seed=7),
-        "lightgbm": LGBMRegressor(n_estimators=40, max_depth=2, learning_rate=0.08, random_state=7, verbose=-1),
-    }
-    for model in models.values():
-        model.fit(x_train, y_train)
     return models, x_train, y_train, x_current
 
 
@@ -293,16 +337,37 @@ def build_shap_explanation(country: str, evidence: Sequence[EvidenceItem]) -> Di
     return {feature: round(float(value), 3) for feature, value in zip(REAL_FEATURE_COLUMNS, shap_values)}
 
 
+def _get_conformal() -> tuple[object, pd.DataFrame]:
+    """Fit the split-conformal model once per process (and per training-CSV version).
+
+    Like the GBM ensemble, the conformal model and its median proxy features
+    depend only on the training dataset, so they are cached across requests.
+    """
+    global _CONFORMAL_CACHE
+    signature = _dataset_signature()
+    cache = _CONFORMAL_CACHE
+    if cache is not None and cache["signature"] == signature:
+        return cache["conformal"], cache["proxy_features"]
+
+    with _CONFORMAL_LOCK:
+        cache = _CONFORMAL_CACHE
+        if cache is not None and cache["signature"] == signature:
+            return cache["conformal"], cache["proxy_features"]
+        x_train, y_train = _training_data()
+        split = int(len(x_train) * 0.6)
+        x_fit, y_fit = x_train[:split], y_train[:split]
+        x_cal, y_cal = x_train[split:], y_train[split:]
+        model = XGBRegressor(n_estimators=30, max_depth=2, learning_rate=0.08, objective="reg:squarederror", random_state=11)
+        conformal = SplitConformalRegressor(estimator=model, confidence_level=0.9, prefit=False)
+        conformal.fit(x_fit, y_fit)
+        conformal.conformalize(x_cal, y_cal)
+        proxy_features = pd.DataFrame([x_train.median(numeric_only=True)], columns=x_train.columns)
+        _CONFORMAL_CACHE = {"signature": signature, "conformal": conformal, "proxy_features": proxy_features}
+        return conformal, proxy_features
+
+
 def build_confidence_interval(score: float, evidence: Sequence[EvidenceItem]) -> ConfidenceInterval:
-    x_train, y_train = _training_data()
-    split = int(len(x_train) * 0.6)
-    x_fit, y_fit = x_train[:split], y_train[:split]
-    x_cal, y_cal = x_train[split:], y_train[split:]
-    model = XGBRegressor(n_estimators=30, max_depth=2, learning_rate=0.08, objective="reg:squarederror", random_state=11)
-    conformal = SplitConformalRegressor(estimator=model, confidence_level=0.9, prefit=False)
-    conformal.fit(x_fit, y_fit)
-    conformal.conformalize(x_cal, y_cal)
-    proxy_features = pd.DataFrame([x_train.median(numeric_only=True)], columns=x_train.columns)
+    conformal, proxy_features = _get_conformal()
     prediction, intervals = conformal.predict_interval(proxy_features)
     lower = float(intervals[0, 0, 0])
     upper = float(intervals[0, 1, 0])

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import List
+from typing import Callable, List, Tuple, TypeVar
 
 from backend.schemas import AssessmentRequest, AssessmentResponse, EvidenceItem, RiskFactor
 from backend.services.api_clients import (
@@ -29,9 +31,40 @@ from backend.services.final_intelligence import (
 from backend.services.llm_summary import build_groq_summary
 from backend.services.storage import save_assessment
 
+logger = logging.getLogger("greysignal.risk_engine")
+
+T = TypeVar("T")
+
+
+def _safe(step: str, fn: Callable[[], T], default: T) -> T:
+    """Run an analytics step, returning ``default`` if it fails.
+
+    The intelligence/ML layer must never break a whole assessment: a failure in
+    one enrichment step (model training, SHAP, forecasting, graph, storage, ...)
+    is logged and degraded to a neutral default so the core risk result is still
+    returned.
+    """
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 - deliberately broad; analytics is best-effort
+        logger.warning("GreySignal step '%s' failed: %s", step, exc)
+        return default
+
+
+def _safe_evidence(source: str, label: str, fn: Callable[[], EvidenceItem]) -> EvidenceItem:
+    """Fetch one evidence item, degrading to an 'unavailable' item on any error."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 - a single connector must not break the request
+        logger.warning("GreySignal evidence '%s' failed: %s", label, exc)
+        return EvidenceItem(source=source, label=label, value="Unavailable", status="unavailable", detail=str(exc))
+
 
 def _number_from_value(value: str) -> float | None:
-    token = value.split()[0].replace(",", "")
+    tokens = value.split()
+    if not tokens:
+        return None
+    token = tokens[0].replace(",", "")
     try:
         return float(token)
     except ValueError:
@@ -126,12 +159,12 @@ def _score_news(news: EvidenceItem) -> RiskFactor:
 
 
 def _score_trade(trade: EvidenceItem) -> RiskFactor:
-    score = 45 if trade.status in {"ok", "partial"} else 60
-    rationale = (
-        "Trade data integration is configured; deeper scoring can be enabled with Comtrade credentials."
-        if trade.status == "partial"
-        else "Trade signal could not be verified."
-    )
+    if trade.status in {"ok", "cached"}:
+        score = 45
+        rationale = "Trade signal retrieved; deeper scoring can be enabled with fuller Comtrade history."
+    else:
+        score = 60
+        rationale = "Trade signal could not be verified, so a mildly elevated neutral score is applied."
     return RiskFactor(name="Trade exposure", score=score, weight=0.12, rationale=rationale)
 
 
@@ -203,31 +236,42 @@ def _recommendation(score: float) -> str:
 def build_assessment(request: AssessmentRequest) -> AssessmentResponse:
     profile = get_country_profile(request.country)
 
-    evidence: List[EvidenceItem] = [
-        fetch_world_bank_indicator(
+    # Each connector is independent, so fetch all evidence concurrently. The
+    # calls are network-bound; running them in parallel turns the slowest single
+    # request (instead of the sum of all seven) into the wall-clock cost.
+    evidence_tasks: List[Tuple[str, str, Callable[[], EvidenceItem]]] = [
+        ("World Bank", "GDP growth", lambda: fetch_world_bank_indicator(
             profile["iso3"],
             "NY.GDP.MKTP.KD.ZG",
             "GDP growth",
             request.start_year,
             request.end_year,
-        ),
-        fetch_world_bank_indicator(
+        )),
+        ("World Bank", "Inflation", lambda: fetch_world_bank_indicator(
             profile["iso3"],
             "FP.CPI.TOTL.ZG",
             "Inflation",
             request.start_year,
             request.end_year,
-        ),
-        fetch_wgi_political_stability(
+        )),
+        ("World Bank WGI", "Political stability score", lambda: fetch_wgi_political_stability(
             profile["iso3"],
             request.start_year,
             request.end_year,
-        ),
-        fetch_exchange_rate(request.base_currency, request.target_currency or profile["currency"]),
-        fetch_weather_risk(profile["lat"], profile["lon"]),
-        fetch_gdelt_news(profile["name"], request.news_keywords),
-        fetch_trade_signal(profile["comtrade_reporter_code"], request.hs_code),
+        )),
+        ("ExchangeRate-API", "Exchange rate", lambda: fetch_exchange_rate(
+            request.base_currency, request.target_currency or profile["currency"]
+        )),
+        ("Open-Meteo", "Weather risk", lambda: fetch_weather_risk(profile["lat"], profile["lon"])),
+        ("GDELT", "News signal", lambda: fetch_gdelt_news(profile["name"], request.news_keywords)),
+        ("UN Comtrade", "Trade signal", lambda: fetch_trade_signal(
+            profile["comtrade_reporter_code"], request.hs_code
+        )),
     ]
+    with ThreadPoolExecutor(max_workers=len(evidence_tasks)) as executor:
+        evidence: List[EvidenceItem] = list(
+            executor.map(lambda task: _safe_evidence(*task), evidence_tasks)
+        )
 
     factors = [
         _score_gdp(evidence[0]),
@@ -246,7 +290,13 @@ def build_assessment(request: AssessmentRequest) -> AssessmentResponse:
         f"The current composite score is {overall:.1f}/100, classified as {rating.lower()}."
     )
 
-    model_outputs = build_model_outputs(profile["name"], evidence)
+    neutral_outputs = {
+        "xgboost": round(overall, 1),
+        "catboost": round(overall, 1),
+        "lightgbm": round(overall, 1),
+        "ensemble": round(overall, 1),
+    }
+    model_outputs = _safe("model_outputs", lambda: build_model_outputs(profile["name"], evidence), neutral_outputs)
     business_fit = next((factor for factor in factors if factor.name == "Business fit"), None)
     business_score = business_fit.score if business_fit else model_outputs["ensemble"]
     final_score = (model_outputs["ensemble"] * 0.85) + (business_score * 0.15)
@@ -266,7 +316,7 @@ def build_assessment(request: AssessmentRequest) -> AssessmentResponse:
         summary=final_summary,
         factors=factors,
         evidence=evidence,
-        ai_summary=build_groq_summary(
+        ai_summary=_safe("ai_summary", lambda: build_groq_summary(
             request,
             profile["name"],
             request.sector,
@@ -275,22 +325,22 @@ def build_assessment(request: AssessmentRequest) -> AssessmentResponse:
             final_recommendation,
             factors,
             evidence,
-        ),
-        agent_outputs=build_agent_outputs(factors, evidence),
+        ), ""),
+        agent_outputs=_safe("agent_outputs", lambda: build_agent_outputs(factors, evidence), []),
         workflow_steps=build_workflow_steps(),
-        retrieval_results=build_retrieval_context(profile["name"], request.sector, evidence),
-        event_signals=extract_event_signals(profile["name"], evidence),
-        sentiment=score_sentiment(evidence),
-        forecasts=build_forecasts(evidence),
+        retrieval_results=_safe("retrieval_results", lambda: build_retrieval_context(profile["name"], request.sector, evidence), []),
+        event_signals=_safe("event_signals", lambda: extract_event_signals(profile["name"], evidence), []),
+        sentiment=_safe("sentiment", lambda: score_sentiment(evidence), {}),
+        forecasts=_safe("forecasts", lambda: build_forecasts(evidence), []),
         model_outputs=model_outputs,
-        shap_explanation=build_shap_explanation(profile["name"], evidence),
-        confidence_interval=build_confidence_interval(final_score, evidence),
-        knowledge_graph={
+        shap_explanation=_safe("shap_explanation", lambda: build_shap_explanation(profile["name"], evidence), {}),
+        confidence_interval=_safe("confidence_interval", lambda: build_confidence_interval(final_score, evidence), None),
+        knowledge_graph=_safe("knowledge_graph", lambda: {
             **build_knowledge_graph(profile["name"], request.sector, factors, evidence),
             "embedding_index": build_embedding_index(evidence),
-        },
+        }, {}),
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    save_assessment(response)
+    _safe("save_assessment", lambda: save_assessment(response), None)
     return response
