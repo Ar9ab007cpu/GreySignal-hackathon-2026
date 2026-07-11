@@ -5,6 +5,7 @@ import Footer from './components/Footer';
 import Wizard from './components/Wizard';
 import Overview from './components/Overview';
 import Results from './components/Results';
+import Developers from './components/Developers';
 
 const DEFAULT_FORM = {
   country: 'Vietnam',
@@ -33,6 +34,7 @@ export default function App() {
   const [assessment, setAssessment] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [view, setView] = useState('app');
 
   useEffect(() => {
     getCountries().then(setCountries);
@@ -53,42 +55,48 @@ export default function App() {
 
   return (
     <div className="app-wrapper">
-      <Header />
+      <Header view={view} onNavigate={setView} />
 
       <main className="app-main">
-        {/* Wizard (always visible) */}
-        <Wizard
-          step={wizardStep}
-          formData={formData}
-          countries={countries}
-          onFormChange={setFormData}
-          onStepChange={(s) => setWizardStep(Math.max(0, Math.min(s, 4)))}
-          onSubmit={handleSubmit}
-        />
+        {view === 'developers' ? (
+          <Developers />
+        ) : (
+          <>
+            {/* Wizard (always visible) */}
+            <Wizard
+              step={wizardStep}
+              formData={formData}
+              countries={countries}
+              onFormChange={setFormData}
+              onStepChange={(s) => setWizardStep(Math.max(0, Math.min(s, 4)))}
+              onSubmit={handleSubmit}
+            />
 
-        <hr className="divider" />
+            <hr className="divider" />
 
-        {/* Error */}
-        {error && (
-          <div className="error-banner">
-            {error}
-          </div>
+            {/* Error */}
+            {error && (
+              <div className="error-banner">
+                {error}
+              </div>
+            )}
+
+            {/* Loading */}
+            {loading && (
+              <div className="loading-overlay">
+                <div className="loading-spinner" />
+                <div className="loading-text">Collecting public signals and scoring risk...</div>
+              </div>
+            )}
+
+            {/* Results or Overview */}
+            {!loading && assessment && <Results assessment={assessment} />}
+            {!loading && !assessment && !error && <Overview />}
+          </>
         )}
-
-        {/* Loading */}
-        {loading && (
-          <div className="loading-overlay">
-            <div className="loading-spinner" />
-            <div className="loading-text">Collecting public signals and scoring risk...</div>
-          </div>
-        )}
-
-        {/* Results or Overview */}
-        {!loading && assessment && <Results assessment={assessment} />}
-        {!loading && !assessment && !error && <Overview />}
       </main>
 
-      <Footer />
+      <Footer onNavigate={setView} />
     </div>
   );
 }
