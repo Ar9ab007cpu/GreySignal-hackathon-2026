@@ -6,6 +6,7 @@ import Wizard from './components/Wizard';
 import Overview from './components/Overview';
 import Results from './components/Results';
 import Developers from './components/Developers';
+import Hero from './components/Hero';
 
 const DEFAULT_FORM = {
   country: 'Vietnam',
@@ -55,13 +56,16 @@ export default function App() {
 
   return (
     <div className="app-wrapper">
-      <Header view={view} onNavigate={setView} />
+      <Header onNavigate={setView} />
 
       <main className="app-main">
         {view === 'developers' ? (
           <Developers />
         ) : (
           <>
+            {/* Landing hero: explains the product before any assessment exists */}
+            {!loading && !assessment && <Hero />}
+
             {/* Wizard (always visible) */}
             <Wizard
               step={wizardStep}

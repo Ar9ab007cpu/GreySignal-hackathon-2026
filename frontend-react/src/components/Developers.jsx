@@ -8,16 +8,18 @@ const TEAM = [
     role: 'Backend & ML Engineering',
     initials: 'RP',
     gradient: 'linear-gradient(145deg, #22D3EE, #0891B2)',
+    website: 'https://ritabratapaul.vercel.app/',
     github: 'https://github.com/Ritabrata-Paul',
     githubLabel: 'Ritabrata-Paul',
     linkedin: 'https://www.linkedin.com/in/ritabrata-paul-23a75919a',
-    email: null,
+    email: 'ritabrata720@gmail.com',
   },
   {
     name: 'Arnab Mondal',
     role: 'Full-Stack & Deployment',
     initials: 'AM',
     gradient: 'linear-gradient(145deg, #F5B942, #F97316)',
+    website: null,
     github: 'https://github.com/Ar9ab007cpu',
     githubLabel: 'Ar9ab007cpu',
     linkedin: 'https://www.linkedin.com/in/arnab-mondal-a511b822a/',
@@ -28,20 +30,22 @@ const TEAM = [
     role: 'Frontend & Product',
     initials: 'AC',
     gradient: 'linear-gradient(145deg, #A78BFA, #7C3AED)',
+    website: null,
     github: 'https://github.com/ARPAN76',
     githubLabel: 'ARPAN76',
     linkedin: 'https://www.linkedin.com/in/arpan97',
-    email: null,
+    email: 'chakrabartyarpan17@gmail.com',
   },
   {
     name: 'Srija Biswas',
     role: 'Data & Research',
     initials: 'SB',
     gradient: 'linear-gradient(145deg, #34D399, #059669)',
+    website: null,
     github: 'https://github.com/srijabiswas-01',
     githubLabel: 'srijabiswas-01',
     linkedin: 'https://www.linkedin.com/in/srija-biswas-a378561a6/',
-    email: null,
+    email: 'srijabiswas3001@gmail.com',
   },
 ];
 
@@ -70,6 +74,16 @@ function MailIcon() {
   );
 }
 
+function GlobeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </svg>
+  );
+}
+
 function DeveloperCard({ member }) {
   return (
     <div className="dev-card">
@@ -84,6 +98,12 @@ function DeveloperCard({ member }) {
       </div>
 
       <div className="dev-links">
+        {member.website && (
+          <a className="dev-link" href={member.website} target="_blank" rel="noreferrer" title="Portfolio website">
+            <GlobeIcon />
+            <span>Portfolio</span>
+          </a>
+        )}
         <a className="dev-link" href={member.github} target="_blank" rel="noreferrer" title={`GitHub: ${member.githubLabel}`}>
           <GithubIcon />
           <span>{member.githubLabel}</span>
