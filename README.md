@@ -4,7 +4,7 @@
 
 GreySignal is a decision-support platform for organizations evaluating whether, where, and how to enter or expand in an international market. It combines public economic, governance, currency, weather, trade, and news signals with the proposed investment's operating profile to produce an explainable country-risk assessment.
 
-The application returns a 0-100 risk score, risk rating, action-oriented recommendation, factor-level reasoning, supporting evidence, specialist-agent findings, forecasts, model predictions, uncertainty bounds, explainability output, and a machine-readable knowledge graph through a guided Streamlit interface and FastAPI API.
+The application returns a 0-100 risk score, risk rating, action-oriented recommendation, factor-level reasoning, supporting evidence, specialist-agent findings, forecasts, model predictions, uncertainty bounds, explainability output, and a machine-readable knowledge graph. It ships with a modern **React (Vite)** web app as the primary interface, an alternative **Streamlit** dashboard, and a **FastAPI** backend. The React frontend is designed to deploy on **Vercel** and the backend on **Render**.
 
 > GreySignal supports early-stage due diligence. It does not replace legal, regulatory, compliance, security, financial, or in-country expert advice.
 
@@ -25,6 +25,7 @@ The application returns a 0-100 risk score, risk rating, action-oriented recomme
 - [Supported Countries](#supported-countries)
 - [Installation and Configuration](#installation-and-configuration)
 - [Running the Application](#running-the-application)
+- [Deployment](#deployment)
 - [Using the Dashboard](#using-the-dashboard)
 - [API Reference](#api-reference)
 - [Training Dataset](#training-dataset)
@@ -32,6 +33,7 @@ The application returns a 0-100 risk score, risk rating, action-oriented recomme
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [Responsible Use](#responsible-use)
+- [Team](#team)
 
 ## Problem Statement
 
@@ -81,7 +83,7 @@ A user completes a five-step assessment wizard describing the target market and 
 
 ### Guided assessment
 
-The Streamlit interface collects:
+The guided wizard (React and Streamlit) collects:
 
 - target country, sector or decision, and city/port;
 - investment size and market-entry mode;
@@ -125,7 +127,7 @@ Every successful assessment is stored in `data/greysignal.sqlite`, including the
 ## How GreySignal Works
 
 ```text
-User inputs (Streamlit wizard)
+User inputs (React / Streamlit wizard)
               |
               v
        POST /assess (FastAPI)
@@ -146,7 +148,7 @@ User inputs (Streamlit wizard)
        +------+------+
        |             |
        v             v
- Streamlit result   SQLite history
+   Web result     SQLite history
 ```
 
 LangGraph currently provides a deterministic four-node orchestration flow. The domain "agents" are structured specialist outputs generated from the evidence and factor results; they are not independent autonomous processes.
@@ -163,7 +165,7 @@ Seven rule-based factors are calculated on a 0-100 risk scale:
 | Inflation pressure | 18% | World Bank consumer-price inflation |
 | Political stability | 22% | World Bank WGI political stability score |
 | Weather disruption | 10% | Open-Meteo seven-day forecast |
-| News and event risk | 18% | GDELT recent headlines and risk terms |
+| News and event risk | 18% | MediaStack/GDELT recent headlines and risk terms |
 | Trade exposure | 12% | UN Comtrade availability/import context |
 | Business fit | 10% | User-provided operating context |
 
@@ -173,13 +175,13 @@ Unavailable GDP, inflation, governance, or news observations generally receive a
 
 ### 2. Machine-learning ensemble
 
-The backend trains three regressors at assessment time using `data/real_training_dataset.csv`:
+The backend trains three regressors using `data/real_training_dataset.csv`:
 
 - XGBoost Regressor;
 - CatBoost Regressor;
 - LightGBM Regressor.
 
-Their predictions are averaged into an ensemble score.
+Their predictions are averaged into an ensemble score. Because the models depend only on the training CSV (not on the individual request), they are **trained once per process and cached** (keyed by the CSV modification time), rather than retrained on every assessment. The MAPIE conformal model is cached the same way, and the seven evidence connectors are fetched concurrently, so a warm request completes in roughly half the time of a cold one.
 
 ### 3. Final displayed score
 
@@ -208,9 +210,12 @@ The other rule-based factors remain important explanatory outputs, while their u
 | World Bank WGI bulk CSV | Political stability, government effectiveness, regulatory quality, rule of law, control of corruption | None | Uses local extracted data or attempts download |
 | ExchangeRate-API | Current base/target exchange rate | API key required | Marks exchange rate unavailable |
 | Open-Meteo | Seven-day temperature, rainfall, and wind forecast | None | Marks weather unavailable |
-| GDELT DOC 2.0 | Recent relevant news headlines and optional historical event counts | None | Uses cached country news when possible |
+| MediaStack | Recent relevant news headlines (**primary** news source) | API key required | Falls back to GDELT, then cache |
+| GDELT DOC 2.0 | Recent news headlines and optional historical event counts (**fallback**) | None | Uses cached country news when possible |
 | UN Comtrade | Import/trade value by reporter and HS code | API key required | Returns partial/unavailable trade evidence |
 | User input | Investment and operating context | None | Included in business-fit factor |
+
+**News source order:** MediaStack is queried first because GDELT's public endpoint frequently returns HTTP 429 rate-limit errors. If MediaStack is unconfigured or returns no data, GreySignal falls back to GDELT, and then to the last cached news signal in `data/gdelt_news_cache.json`. MediaStack is queried on the country name (its keyword parameter treats multi-term strings as AND, so the returned headlines are scanned downstream for risk terms).
 
 The `.env.example` file contains the expected service URLs. `WORLD_BANK_DOCS_URL`, `OPEN_METEO_GEOCODING_URL`, and `ACLED_API_URL` are configurable placeholders but are not currently called by the assessment workflow.
 
@@ -271,8 +276,9 @@ When `GROQ_API_KEY` is configured, GreySignal requests an executive brief from `
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Frontend | Streamlit 1.41.1 | Guided wizard and interactive result dashboard |
-| Visualization | Plotly 5.24.1 | Risk gauge and factor chart |
+| Frontend (primary) | React 19 + Vite 6 | Guided wizard, result dashboard, developer profiles, custom SVG/canvas charts |
+| Frontend (alternative) | Streamlit 1.41.1 | Guided wizard and interactive result dashboard |
+| Visualization | Plotly 5.24.1 (Streamlit) / hand-built SVG + canvas (React) | Risk gauge, factor charts, force-directed knowledge graph |
 | Backend | FastAPI 0.115.6 | REST API and request routing |
 | API server | Uvicorn 0.34.0 | ASGI development server |
 | Validation | Pydantic 2.12.5 | Typed request and response schemas |
@@ -301,7 +307,9 @@ When `GROQ_API_KEY` is configured, GreySignal requests an executive brief from `
 
 ### Frontend
 
-`frontend/app.py` provides the five-step wizard, calls the backend, and renders the score, recommendation, evidence, factor chart, AI brief, agent findings, retrieval results, event/sentiment output, forecasts, model details, graph preview, and raw JSON.
+**React (primary, `frontend-react/`)** — a Vite single-page app with a five-step assessment wizard, a results view (risk gauge, factor bars, evidence, and tabs for AI brief, agents, retrieval, events, forecasts, models, and a force-directed knowledge graph), a home landing hero explaining the product, and a Developers profile page. It talks to the backend through a `/api` prefix, which is proxied to the FastAPI server (Vite dev proxy locally, `vercel.json` rewrite in production).
+
+**Streamlit (alternative, `frontend/app.py`)** — provides the same five-step wizard and renders the score, recommendation, evidence, factor chart, AI brief, agent findings, retrieval results, event/sentiment output, forecasts, model details, graph preview, and raw JSON.
 
 ### API and schemas
 
@@ -336,7 +344,16 @@ GreySignal-hackathon-2026-main/
 |       |-- risk_engine.py       # Assessment and scoring logic
 |       `-- storage.py           # SQLite persistence
 |-- frontend/
-|   `-- app.py                   # Streamlit interface
+|   `-- app.py                   # Streamlit interface (alternative)
+|-- frontend-react/              # React + Vite web app (primary)
+|   |-- src/
+|   |   |-- App.jsx              # Root component and view routing
+|   |   |-- api.js               # Backend API client (/api)
+|   |   |-- index.css            # Design system and styles
+|   |   `-- components/          # Header, Footer, Wizard, Results,
+|   |                            #   Overview, Hero, Developers, RiskGauge
+|   |-- vite.config.js           # Dev server + /api proxy
+|   `-- vercel.json              # Production /api -> backend rewrite
 |-- scripts/
 |   `-- build_training_dataset.py
 |-- data/
@@ -413,6 +430,7 @@ HTTP_TIMEOUT_SECONDS=30
 EXCHANGE_RATE_API_KEY=your_exchange_rate_key_here
 UN_COMTRADE_API_KEY=your_un_comtrade_key_here
 GROQ_API_KEY=your_groq_key_here
+MEDIASTACK_API_KEY=your_mediastack_key_here
 ```
 
 Do not commit `.env` or real credentials. The application loads `.env` with override enabled, so its values take precedence over existing process variables of the same name.
@@ -421,6 +439,7 @@ Do not commit `.env` or real credentials. The application loads `.env` with over
 
 - **No ExchangeRate-API key:** the currency evidence is marked unavailable; assessment continues.
 - **No UN Comtrade key:** trade data is partial/unavailable; assessment continues.
+- **No MediaStack key:** the primary news source is skipped and GreySignal falls back to GDELT (and then cache) for the news signal.
 - **No Groq key:** the AI brief is empty, but all deterministic and ML analysis still runs.
 - **No keys at all:** the project remains usable with reduced evidence coverage because World Bank, WGI, Open-Meteo, and GDELT do not require project-specific keys.
 
@@ -472,6 +491,49 @@ In another terminal:
 $env:GREYSIGNAL_API_URL = "http://127.0.0.1:8010"
 .\.venv\Scripts\python.exe -m streamlit run frontend/app.py
 ```
+
+### Run the React frontend locally
+
+From `frontend-react/`:
+
+```powershell
+cd frontend-react
+npm install
+npm run dev
+```
+
+Open the printed URL (default `http://localhost:3000`). The Vite dev server proxies `/api` to the backend at `http://127.0.0.1:8010`, so start the backend first.
+
+## Deployment
+
+The React frontend and the FastAPI backend deploy as two separate services.
+
+### Backend (Render)
+
+The backend is a Python ML service and must run on a container/VM host such as **Render**, Railway, or Fly.io — not on a serverless frontend platform. Deploy the repository root with:
+
+- Build: `pip install -r requirements.txt`
+- Start: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+- Environment: set the same keys as `.env` (ExchangeRate-API, UN Comtrade, MediaStack, Groq) in the host's dashboard.
+
+Confirm the deployment with `GET https://<your-backend-host>/health`, which should return `{"status": "ok", ...}`.
+
+### Frontend (Vercel)
+
+The React app deploys on **Vercel**:
+
+1. Import the GitHub repository into Vercel.
+2. Set **Root Directory** to `frontend-react`.
+3. The Vite framework preset is auto-detected (build `npm run build`, output `dist`).
+4. `frontend-react/vercel.json` rewrites `/api/:path*` to the backend, so no environment variable is required:
+
+   ```json
+   { "source": "/api/:path*", "destination": "https://<your-backend-host>/:path*" }
+   ```
+
+   Update the destination host in `vercel.json` if your backend URL differs.
+
+Because the browser calls the same origin (`/api/...`) and Vercel proxies to the backend, no cross-origin CORS configuration is needed on the frontend.
 
 ## Using the Dashboard
 
@@ -597,23 +659,24 @@ The ML assessment requires this file and at least 12 usable rows. If it is missi
 
 ## Reliability and Fallback Behavior
 
-GreySignal isolates most external evidence failures so one unavailable source does not stop the full collection phase:
+GreySignal isolates external evidence failures so one unavailable source does not stop the full collection phase:
 
+- the seven evidence connectors are fetched concurrently, each wrapped so an unexpected error degrades to an `unavailable` item instead of failing the request;
 - missing endpoint configuration is returned as unavailable evidence;
 - HTTP failures are captured in the evidence detail;
 - missing country metadata produces unavailable evidence rather than fabricated values;
-- live GDELT failures use `data/gdelt_news_cache.json` when a previous result exists;
+- the news signal falls back MediaStack → GDELT → `data/gdelt_news_cache.json`;
 - missing API keys degrade only their related evidence and optional LLM output;
 - neutral risk values are used for several unavailable rule-factor inputs;
 - every evidence item carries a status such as `ok`, `cached`, `partial`, or `unavailable`.
 
-The ML dataset is a hard dependency. Model-training, SHAP, MAPIE, unexpected data-shape errors, or uncaught local I/O errors can still fail an assessment.
+The intelligence/ML layer is also fault-isolated: model outputs, SHAP, MAPIE, forecasts, retrieval, the knowledge graph, the LLM brief, and history storage each run inside a guard that logs the error and degrades to a neutral default rather than failing the whole assessment. If model training fails, the ensemble falls back to the interpretable rule-based composite score. The training dataset (`data/real_training_dataset.csv`, at least 12 usable rows) is still required for the real ML outputs; without it those specific fields fall back to neutral values.
 
 ## Limitations
 
 - GreySignal is an MVP and has not been calibrated as a regulated credit, insurance, sanctions, or investment-rating product.
 - The supervised target is derived from political stability, so the model is more strongly anchored to governance risk than to realized business loss.
-- Models are retrained on every assessment rather than loaded from versioned, prevalidated artifacts.
+- Models are trained in-process and cached (not retrained per request), but they are still fit at runtime rather than loaded from versioned, prevalidated artifacts.
 - The current confidence interval uses a median-feature proxy and is not tailored to the exact current-country feature vector.
 - Prophet uses a constructed short trend from the latest value, not a complete historical time series.
 - News sentiment and event extraction are keyword/rule based and can miss context, negation, language variation, or duplicate coverage.
@@ -673,6 +736,19 @@ GreySignal should be used as a transparent screening and scenario-analysis tool.
 - involve legal, compliance, tax, security, supply-chain, and local-market experts;
 - document the business assumptions behind each assessment;
 - reassess when major events, policies, or operating plans change.
+
+## Team
+
+GreySignal was built by a four-person team for Hackathon 2026.
+
+| Name | Role | Links |
+|---|---|---|
+| Ritabrata Paul | Full-Stack & Deployment | [Portfolio](https://ritabratapaul.vercel.app/) · [GitHub](https://github.com/Ritabrata-Paul) · [LinkedIn](https://www.linkedin.com/in/ritabrata-paul-23a75919a) |
+| Arnab Mondal | Backend & ML Engineering | [GitHub](https://github.com/Ar9ab007cpu) · [LinkedIn](https://www.linkedin.com/in/arnab-mondal-a511b822a/) |
+| Arpan Chakraborty | Frontend & Product | [GitHub](https://github.com/ARPAN76) · [LinkedIn](https://www.linkedin.com/in/arpan97) |
+| Srija Biswas | Data & Research | [GitHub](https://github.com/srijabiswas-01) · [LinkedIn](https://www.linkedin.com/in/srija-biswas-a378561a6/) |
+
+A live "Meet the Developers" page is also available in the React app (linked from the footer).
 
 ---
 
