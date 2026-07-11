@@ -157,12 +157,16 @@ def fetch_weather_risk(latitude: float, longitude: float) -> EvidenceItem:
         "end_date": (today + timedelta(days=6)).isoformat(),
     }
 
+    def _safe_max(values: Any) -> float:
+        numbers = [v for v in (values or []) if isinstance(v, (int, float))]
+        return max(numbers) if numbers else 0.0
+
     try:
         payload = _get_json(url, params=params)
         daily = payload.get("daily", {})
-        max_temp = max(daily.get("temperature_2m_max", [0]))
-        max_precip = max(daily.get("precipitation_sum", [0]))
-        max_wind = max(daily.get("wind_speed_10m_max", [0]))
+        max_temp = _safe_max(daily.get("temperature_2m_max"))
+        max_precip = _safe_max(daily.get("precipitation_sum"))
+        max_wind = _safe_max(daily.get("wind_speed_10m_max"))
         flags = []
         if max_temp >= 38:
             flags.append("extreme heat")
@@ -238,7 +242,7 @@ def fetch_gdelt_news(country: str, keywords: str = "business OR trade OR electio
             cached.status = "cached"
             return cached
         return _unavailable(
-            "News signal",
+            "GDELT",
             "News signal",
             "MediaStack returned no data and GDELT_DOC_URL is not configured.",
         )
