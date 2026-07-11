@@ -1,0 +1,23 @@
+{
+  "vietnam": {
+    "source": "MediaStack",
+    "label": "News signal",
+    "value": "5 relevant recent articles",
+    "status": "ok",
+    "detail": "Vietnam defies Eurosatory ban and met with Israeli defense companies | Vietjet Launches Historic Direct Flights Linking Sri Lanka and Vietnam for the First Time | Pacific Partnership 2026 Acting SECNAV All Hands Call [Image 2 of 2]"
+  },
+  "india": {
+    "source": "MediaStack",
+    "label": "News signal",
+    "value": "5 relevant recent articles",
+    "status": "ok",
+    "detail": "England v India: women\u2019s Test, day two updates \u2013 live | Shubman Gill links up with Tennis legend during Wimbledon ahead of ENG vs IND 2026 ODIs [Watch] | Predicting Team India's playing XI for 5th ENG vs IND 2026 T20I ft. Sanju Samson, Arshdeep Singh"
+  },
+  "germany": {
+    "source": "MediaStack",
+    "label": "News signal",
+    "value": "5 relevant recent articles",
+    "status": "ok",
+    "detail": "Spain v Belgium: World Cup 2026 quarter-final \u2013 live | Qatar vetoes Volkswagen deal with Israeli defense company Rafael in Germany - report | Passenger is sucked out of Ryanair plane window up to his shoulders and has to be pulled back in by other travellers during flight to Germany"
+  }
+}

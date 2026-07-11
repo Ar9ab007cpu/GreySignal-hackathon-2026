@@ -21,6 +21,8 @@ class Settings:
     groq_api_url: str = os.getenv("GROQ_API_URL", "")
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     acled_api_url: str = os.getenv("ACLED_API_URL", "")
+    mediastack_api_url: str = os.getenv("MEDIASTACK_API_URL", "")
+    mediastack_api_key: str = os.getenv("MEDIASTACK_API_KEY", "")
 
 
 settings = Settings()

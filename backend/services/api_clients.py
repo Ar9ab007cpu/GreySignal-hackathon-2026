@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,10 +14,25 @@ from backend.services.dataset_builder import WGI_INDICATORS, _load_wgi_scores
 
 GDELT_CACHE_PATH = Path("data/gdelt_news_cache.json")
 
-def _get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    response = requests.get(url, params=params, timeout=settings.http_timeout_seconds)
-    response.raise_for_status()
-    return response.json()
+def _get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> Any:
+    """HTTP GET with exponential backoff for 429 rate-limit responses."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, params=params, timeout=settings.http_timeout_seconds)
+            if response.status_code == 429 and attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)           # 2s, 4s, 8s
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            last_exc = exc
+            if "429" in str(exc) and attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise
+    raise last_exc  # type: ignore[misc]
 
 
 def _unavailable(source: str, label: str, detail: str) -> EvidenceItem:
@@ -169,9 +185,63 @@ def fetch_weather_risk(latitude: float, longitude: float) -> EvidenceItem:
         return _unavailable("Open-Meteo", "Weather risk", str(exc))
 
 
+def _fetch_mediastack_news(country: str, keywords: str = "") -> Optional[EvidenceItem]:
+    """Primary news source using MediaStack API.
+
+    MediaStack treats a multi-term ``keywords`` string as AND/phrase rather than
+    boolean OR, so passing the GDELT-style risk-term list returns zero results
+    for most countries. We therefore query on the country name alone (which
+    reliably returns recent coverage) and let downstream news scoring scan the
+    returned headlines for risk terms. ``keywords`` is accepted for API
+    compatibility but intentionally not sent to MediaStack.
+    """
+    if not settings.mediastack_api_url or not settings.mediastack_api_key:
+        return None
+
+    params = {
+        "access_key": settings.mediastack_api_key,
+        "keywords": country,
+        "languages": "en",
+        "limit": 5,
+        "sort": "published_desc",
+    }
+
+    try:
+        payload = _get_json(settings.mediastack_api_url, params=params, max_retries=2)
+        articles: List[Dict[str, Any]] = payload.get("data", [])
+        if not articles:
+            return None
+
+        titles = [article.get("title", "Untitled") for article in articles[:3]]
+        return EvidenceItem(
+            source="MediaStack",
+            label="News signal",
+            value=f"{len(articles)} relevant recent articles",
+            detail=" | ".join(titles),
+        )
+    except requests.RequestException:
+        return None
+
+
 def fetch_gdelt_news(country: str, keywords: str = "business OR trade OR election OR unrest") -> EvidenceItem:
+    # MediaStack is the primary news source. GDELT's public endpoint frequently
+    # returns HTTP 429, so it is only used as a fallback when MediaStack is
+    # unavailable or returns no data.
+    ms = _fetch_mediastack_news(country, keywords)
+    if ms:
+        _write_gdelt_cache(country, ms)
+        return ms
+
     if not settings.gdelt_doc_url:
-        return _unavailable("GDELT", "News signal", "GDELT_DOC_URL is not configured.")
+        cached = _read_gdelt_cache(country)
+        if cached:
+            cached.status = "cached"
+            return cached
+        return _unavailable(
+            "News signal",
+            "News signal",
+            "MediaStack returned no data and GDELT_DOC_URL is not configured.",
+        )
 
     url = settings.gdelt_doc_url
     params = {
@@ -186,6 +256,10 @@ def fetch_gdelt_news(country: str, keywords: str = "business OR trade OR electio
         payload = _get_json(url, params=params)
         articles: List[Dict[str, Any]] = payload.get("articles", [])
         if not articles:
+            cached = _read_gdelt_cache(country)
+            if cached:
+                cached.status = "cached"
+                return cached
             return _unavailable("GDELT", "News signal", "No articles returned.")
 
         titles = [article.get("title", "Untitled") for article in articles[:3]]
@@ -198,6 +272,7 @@ def fetch_gdelt_news(country: str, keywords: str = "business OR trade OR electio
         _write_gdelt_cache(country, item)
         return item
     except requests.RequestException as exc:
+        # GDELT failed (likely 429) — fall back to the last cached signal.
         cached = _read_gdelt_cache(country)
         if cached:
             cached.status = "cached"

@@ -218,7 +218,7 @@ def _latest_country_features(country: str) -> Dict[str, float]:
     return {column: float(latest[column]) for column in REAL_FEATURE_COLUMNS if column in latest and pd.notna(latest[column])}
 
 
-def _feature_vector(country: str, evidence: Sequence[EvidenceItem]) -> np.ndarray:
+def _feature_vector(country: str, evidence: Sequence[EvidenceItem], feature_columns: Sequence[str] = REAL_FEATURE_COLUMNS) -> pd.DataFrame:
     values = _latest_country_features(country)
     for item in evidence:
         if item.label == "GDP growth":
@@ -238,10 +238,10 @@ def _feature_vector(country: str, evidence: Sequence[EvidenceItem]) -> np.ndarra
             for column in REAL_FEATURE_COLUMNS
             if column in dataset.columns and dataset[column].notna().any()
         }
-    return np.array([[values.get(column, medians.get(column, 0.0)) for column in REAL_FEATURE_COLUMNS]], dtype=float)
+    return pd.DataFrame([[values.get(column, medians.get(column, 0.0)) for column in feature_columns]], columns=list(feature_columns), dtype=float)
 
 
-def _training_data() -> tuple[np.ndarray, np.ndarray]:
+def _training_data() -> tuple[pd.DataFrame, pd.Series]:
     dataset = load_training_dataset()
     feature_columns = REAL_FEATURE_COLUMNS
     if dataset is not None and all(column in dataset.columns for column in ["final_risk_score"]):
@@ -255,16 +255,14 @@ def _training_data() -> tuple[np.ndarray, np.ndarray]:
             training[column] = training[column].fillna(training[column].median())
         training = training.dropna(subset=present_features + ["final_risk_score"])
         if len(training) >= 12:
-            return training[present_features].to_numpy(dtype=float), training["final_risk_score"].to_numpy(dtype=float)
+            return training[present_features].astype(float), training["final_risk_score"].astype(float)
 
     raise RuntimeError("Real training dataset is missing or too small. Run scripts/build_training_dataset.py first.")
 
 
-def _fit_models(country: str, evidence: Sequence[EvidenceItem]) -> tuple[Dict[str, object], np.ndarray, np.ndarray, np.ndarray]:
+def _fit_models(country: str, evidence: Sequence[EvidenceItem]) -> tuple[Dict[str, object], pd.DataFrame, pd.Series, pd.DataFrame]:
     x_train, y_train = _training_data()
-    x_current = _feature_vector(country, evidence)
-    if x_current.shape[1] != x_train.shape[1]:
-        x_current = x_current[:, : x_train.shape[1]]
+    x_current = _feature_vector(country, evidence, x_train.columns)
     models = {
         "xgboost": XGBRegressor(n_estimators=40, max_depth=2, learning_rate=0.08, objective="reg:squarederror", random_state=7),
         "catboost": CatBoostRegressor(iterations=40, depth=2, learning_rate=0.08, loss_function="RMSE", verbose=False, random_seed=7),
@@ -304,7 +302,7 @@ def build_confidence_interval(score: float, evidence: Sequence[EvidenceItem]) ->
     conformal = SplitConformalRegressor(estimator=model, confidence_level=0.9, prefit=False)
     conformal.fit(x_fit, y_fit)
     conformal.conformalize(x_cal, y_cal)
-    proxy_features = np.nanmedian(x_train, axis=0).reshape(1, -1)
+    proxy_features = pd.DataFrame([x_train.median(numeric_only=True)], columns=x_train.columns)
     prediction, intervals = conformal.predict_interval(proxy_features)
     lower = float(intervals[0, 0, 0])
     upper = float(intervals[0, 1, 0])
