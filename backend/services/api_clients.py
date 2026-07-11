@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -13,6 +14,71 @@ from backend.schemas import EvidenceItem
 from backend.services.dataset_builder import WGI_INDICATORS, _load_wgi_scores
 
 GDELT_CACHE_PATH = Path("data/gdelt_news_cache.json")
+
+# Risk lexicon used to keep only geopolitical/business-risk-relevant headlines.
+# Combined with the caller's news_keywords so user intent drives relevance too.
+# Deliberately sharp: broad words like "military", "war", "oil" are excluded
+# because they pull in ceremonial, defense-PR, and sports content.
+_DEFAULT_RISK_TERMS = [
+    # civil unrest & politics
+    "strike", "protest", "unrest", "riot", "demonstration", "clash", "crackdown",
+    "curfew", "martial law", "coup", "insurgency", "militant", "election",
+    "referendum", "impeachment", "corruption", "scandal", "bribery", "fraud",
+    # trade & economy
+    "tariff", "sanction", "sanctions", "embargo", "boycott", "trade war",
+    "trade deficit", "inflation", "recession", "crisis", "default", "devaluation",
+    "debt crisis", "layoff", "shutdown", "bankruptcy", "nationalization",
+    "expropriation", "dispute",
+    # security & conflict
+    "conflict", "war crime", "terror", "terrorist", "blockade", "tension",
+    "ceasefire", "truce", "missile", "nuclear", "airstrike", "espionage",
+    "cyberattack", "data breach", "national security", "downgrade",
+    # supply chain & operations
+    "supply chain", "shortage", "disruption", "port strike", "recall",
+    # disasters & health
+    "flood", "earthquake", "cyclone", "hurricane", "outbreak", "pandemic", "lockdown",
+    # regulatory & legal
+    "regulation", "ban", "probe", "lawsuit", "antitrust",
+]
+
+
+# Drop obvious non-risk noise that MediaStack classifies as general news:
+# sports fixtures, defense-PR image galleries/ceremonies, and entertainment.
+_NEWS_EXCLUDE_RE = re.compile(
+    r"\[image|\bvs\b|world cup|\bfifa\b|premier league|la liga|champions league|"
+    r"quarter-final|semi-final|\bcricket\b|\bipl\b|test match|\bodi\b|goalkeeper|"
+    r"\bstriker\b|frocking|warfighter|all hands|frocking ceremony|medal of honor|"
+    r"box office|trailer|\bepisode\b|celebrity|red carpet|\balbum\b",
+    re.IGNORECASE,
+)
+
+_TITLE_NORMALIZE_RE = re.compile(r"\[image[^\]]*\]|[^a-z0-9]+", re.IGNORECASE)
+
+
+def _parse_keyword_terms(keywords: str) -> List[str]:
+    """Split a GDELT-style boolean keyword string into lowercase terms."""
+    parts = re.split(r"\b(?:OR|AND|NOT)\b", keywords or "", flags=re.IGNORECASE)
+    return [part.strip().lower() for part in parts if part.strip()]
+
+
+def _compile_terms(terms: List[str]) -> Optional["re.Pattern[str]"]:
+    """Compile a word-boundary regex from terms (deduped). Word boundaries avoid
+    false positives such as 'war' matching 'award' or 'ban' matching 'urban'."""
+    seen: set[str] = set()
+    unique: List[str] = []
+    for term in terms:
+        if term and term not in seen:
+            seen.add(term)
+            unique.append(term)
+    if not unique:
+        return None
+    escaped = sorted((re.escape(term) for term in unique), key=len, reverse=True)
+    return re.compile(r"\b(?:" + "|".join(escaped) + r")\b", re.IGNORECASE)
+
+
+def _normalize_title(title: str) -> str:
+    """Collapse near-identical headlines (e.g. '... [Image 2 of 4]') for dedup."""
+    return _TITLE_NORMALIZE_RE.sub(" ", (title or "").lower()).strip()[:60]
 
 def _get_json(url: str, params: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> Any:
     """HTTP GET with exponential backoff for 429 rate-limit responses."""
@@ -190,14 +256,15 @@ def fetch_weather_risk(latitude: float, longitude: float) -> EvidenceItem:
 
 
 def _fetch_mediastack_news(country: str, keywords: str = "") -> Optional[EvidenceItem]:
-    """Primary news source using MediaStack API.
+    """Primary news source using MediaStack API, filtered for risk relevance.
 
     MediaStack treats a multi-term ``keywords`` string as AND/phrase rather than
-    boolean OR, so passing the GDELT-style risk-term list returns zero results
-    for most countries. We therefore query on the country name alone (which
-    reliably returns recent coverage) and let downstream news scoring scan the
-    returned headlines for risk terms. ``keywords`` is accepted for API
-    compatibility but intentionally not sent to MediaStack.
+    boolean OR, so passing the risk-term list directly returns almost no results.
+    Instead we fetch a broad batch of recent country news (excluding sports and
+    entertainment) and filter locally to headlines that mention a risk term
+    (the caller's news_keywords plus a built-in lexicon). This yields
+    risk-assessment-oriented coverage rather than general news, and feeds the
+    downstream news scoring, event extraction, and sentiment with relevant text.
     """
     if not settings.mediastack_api_url or not settings.mediastack_api_key:
         return None
@@ -205,26 +272,62 @@ def _fetch_mediastack_news(country: str, keywords: str = "") -> Optional[Evidenc
     params = {
         "access_key": settings.mediastack_api_key,
         "keywords": country,
+        "categories": "-sports,-entertainment",
         "languages": "en",
-        "limit": 5,
+        "limit": 50,
         "sort": "published_desc",
     }
 
     try:
         payload = _get_json(settings.mediastack_api_url, params=params, max_retries=2)
-        articles: List[Dict[str, Any]] = payload.get("data", [])
-        if not articles:
-            return None
-
-        titles = [article.get("title", "Untitled") for article in articles[:3]]
-        return EvidenceItem(
-            source="MediaStack",
-            label="News signal",
-            value=f"{len(articles)} relevant recent articles",
-            detail=" | ".join(titles),
-        )
     except requests.RequestException:
         return None
+
+    articles: List[Dict[str, Any]] = payload.get("data", []) if isinstance(payload, dict) else []
+    if not articles:
+        return None
+
+    user_terms = _parse_keyword_terms(keywords)
+    user_pattern = _compile_terms(user_terms)
+    full_pattern = _compile_terms(user_terms + _DEFAULT_RISK_TERMS)
+
+    def _text(article: Dict[str, Any]) -> str:
+        return f"{article.get('title', '')} {article.get('description', '')}"
+
+    # Drop sports/defense-PR/entertainment noise before risk matching.
+    articles = [a for a in articles if not _NEWS_EXCLUDE_RE.search(_text(a))]
+    if not articles:
+        return None
+
+    risky = [a for a in articles if full_pattern and full_pattern.search(_text(a))]
+
+    # Rank headlines that match the caller's specific risk keywords above those
+    # matching only the generic lexicon; sort is stable so recency is preserved.
+    ranked = sorted(risky, key=lambda a: 0 if (user_pattern and user_pattern.search(_text(a))) else 1)
+
+    # Collapse duplicate/near-identical headlines for the displayed detail.
+    ordered = ranked or articles
+    seen_titles: set[str] = set()
+    distinct: List[Dict[str, Any]] = []
+    for article in ordered:
+        key = _normalize_title(article.get("title", ""))
+        if key and key not in seen_titles:
+            seen_titles.add(key)
+            distinct.append(article)
+
+    titles = [article.get("title") or "Untitled" for article in distinct[:3]]
+
+    if risky:
+        value = f"{len(risky)} risk-relevant articles (of {len(articles)} recent)"
+    else:
+        value = f"{len(articles)} recent articles; no direct risk signals"
+
+    return EvidenceItem(
+        source="MediaStack",
+        label="News signal",
+        value=value,
+        detail=" | ".join(titles),
+    )
 
 
 def fetch_gdelt_news(country: str, keywords: str = "business OR trade OR election OR unrest") -> EvidenceItem:
