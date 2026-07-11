@@ -5,7 +5,7 @@
 const TEAM = [
   {
     name: 'Ritabrata Paul',
-    role: 'Backend & ML Engineering',
+    role: 'Full-Stack & Deployment',
     initials: 'RP',
     gradient: 'linear-gradient(145deg, #22D3EE, #0891B2)',
     website: 'https://ritabratapaul.vercel.app/',
@@ -16,7 +16,7 @@ const TEAM = [
   },
   {
     name: 'Arnab Mondal',
-    role: 'Full-Stack & Deployment',
+    role: 'Backend & ML Engineering',
     initials: 'AM',
     gradient: 'linear-gradient(145deg, #F5B942, #F97316)',
     website: null,
