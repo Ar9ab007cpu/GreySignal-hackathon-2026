@@ -1,12 +1,12 @@
-export default function Header({ view = 'app', onNavigate }) {
-  const go = (target) => () => onNavigate && onNavigate(target);
+export default function Header({ onNavigate }) {
+  const goHome = () => onNavigate && onNavigate('app');
 
   return (
     <header className="header">
       <div className="header-inner">
         <div
           className="header-brand"
-          onClick={go('app')}
+          onClick={goHome}
           style={{ cursor: onNavigate ? 'pointer' : 'default' }}
         >
           <div className="header-logo" />
@@ -16,22 +16,7 @@ export default function Header({ view = 'app', onNavigate }) {
           </div>
         </div>
 
-        {onNavigate && (
-          <nav className="header-nav">
-            <button
-              className={`header-nav-link ${view === 'app' ? 'active' : ''}`}
-              onClick={go('app')}
-            >
-              Assessment
-            </button>
-            <button
-              className={`header-nav-link ${view === 'developers' ? 'active' : ''}`}
-              onClick={go('developers')}
-            >
-              Developers
-            </button>
-          </nav>
-        )}
+        <div className="header-tag">Decision Intelligence</div>
       </div>
     </header>
   );
